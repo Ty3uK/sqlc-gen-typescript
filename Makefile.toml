@@ -25,3 +25,7 @@ args = [
   "${CARGO_MAKE_WORKING_DIRECTORY}/${WASM_FILENAME}",
 ]
 dependencies = ["wasm"]
+
+[tasks.changelog]
+command = "git-cliff"
+args = ["-c", "github", "--bump", "--output=CHANGELOG.md"]
