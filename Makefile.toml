@@ -1,0 +1,27 @@
+[env]
+WASM_TARGET = "wasm32-wasip1"
+WASM_FILENAME = "${CARGO_MAKE_CRATE_FS_NAME}.wasm"
+WASM_RELEASE_DIR = "${CARGO_MAKE_CRATE_TARGET_DIRECTORY}/${WASM_TARGET}/release"
+
+[tasks.default]
+alias = "optimize"
+
+[tasks.test]
+command = "cargo"
+args = ["test"]
+
+[tasks.wasm]
+command = "cargo"
+args = ["build", "--release", "--target=${WASM_TARGET}"]
+
+[tasks.optimize]
+command = "wasm-opt"
+args = [
+  "--converge",
+  "--all-features",
+  "-Os",
+  "${WASM_RELEASE_DIR}/${WASM_FILENAME}",
+  "-o",
+  "${CARGO_MAKE_WORKING_DIRECTORY}/${WASM_FILENAME}",
+]
+dependencies = ["wasm"]
