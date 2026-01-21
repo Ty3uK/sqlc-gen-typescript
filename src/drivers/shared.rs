@@ -1,13 +1,16 @@
-use oxc_allocator::{Allocator, Dummy};
+use oxc_allocator::{Allocator, Dummy, Vec};
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
-        Atom, Expression, ImportOrExportKind, NumberBase, PropertyKey, PropertyKind, Span,
-        Statement, TSTupleElement, TemplateElementValue, VariableDeclarationKind,
+        Argument, Expression, ImportOrExportKind, NumberBase, PropertyKind, Span, Statement,
+        TemplateElementValue, VariableDeclarationKind,
     },
 };
 
-use crate::{drivers::Driver, plugin::Query};
+use crate::{
+    ast_utils::new_obj_member_expr,
+    drivers::{Driver, Query},
+};
 
 pub fn args_decl<'a>(
     allocator: &'a Allocator,
@@ -18,27 +21,22 @@ pub fn args_decl<'a>(
     let span = Span::dummy(allocator);
     let iface_body = builder.ts_interface_body(
         span,
-        builder.vec_from_iter(query.params.iter().enumerate().map(|(index, param)| {
-            let column_name: Atom;
-            if let Some(column) = &param.column {
-                column_name = builder.atom(column.name.as_str());
-            } else {
-                column_name = builder.atom(format!("arg_{index}").as_str());
-            }
-            return builder.ts_signature_property_signature(
+        builder.vec_from_iter(query.query.params.iter().enumerate().map(|(index, param)| {
+            builder.ts_signature_property_signature(
                 span,
                 false,
                 false,
                 false,
-                PropertyKey::from(builder.expression_identifier(span, column_name)),
+                builder
+                    .expression_identifier(span, query.arg_names[index])
+                    .into(),
                 Some(builder.ts_type_annotation(span, driver.column_type(param.column.as_ref()))),
-            );
+            )
         })),
     );
-    let iface_name_atom = builder.atom(format!("{}Args", query.name).as_str());
     let iface_decl = builder.declaration_ts_interface(
         span,
-        builder.binding_identifier(span, iface_name_atom),
+        builder.binding_identifier(span, query.args),
         NONE,
         builder.vec(),
         iface_body,
@@ -52,7 +50,7 @@ pub fn args_decl<'a>(
         ImportOrExportKind::Value,
         NONE,
     );
-    return Statement::from(export_decl);
+    return export_decl.into();
 }
 
 pub fn row_decl<'a>(
@@ -64,21 +62,22 @@ pub fn row_decl<'a>(
     let span = Span::dummy(allocator);
     let iface_body = builder.ts_interface_body(
         span,
-        builder.vec_from_iter(query.columns.iter().map(|column| {
-            return builder.ts_signature_property_signature(
+        builder.vec_from_iter(query.query.columns.iter().map(|column| {
+            builder.ts_signature_property_signature(
                 span,
                 false,
                 false,
                 false,
-                PropertyKey::from(builder.expression_identifier(span, column.name.as_str())),
+                builder
+                    .expression_identifier(span, column.name.as_str())
+                    .into(),
                 Some(builder.ts_type_annotation(span, driver.column_type(Some(column)))),
-            );
+            )
         })),
     );
-    let iface_name_atom = builder.atom(format!("{}Row", query.name).as_str());
     let iface_decl = builder.declaration_ts_interface(
         span,
-        builder.binding_identifier(span, iface_name_atom),
+        builder.binding_identifier(span, query.row),
         NONE,
         builder.vec(),
         iface_body,
@@ -92,7 +91,7 @@ pub fn row_decl<'a>(
         ImportOrExportKind::Value,
         NONE,
     );
-    return Statement::from(export_decl);
+    return export_decl.into();
 }
 
 pub fn row_values_decl<'a>(
@@ -104,14 +103,17 @@ pub fn row_values_decl<'a>(
     let span = Span::dummy(allocator);
     let type_alias_body = builder.ts_type_tuple_type(
         span,
-        builder.vec_from_iter(query.columns.iter().map(|column| {
-            return TSTupleElement::from(driver.column_type(Some(column)));
-        })),
+        builder.vec_from_iter(
+            query
+                .query
+                .columns
+                .iter()
+                .map(|column| driver.column_type(Some(column)).into()),
+        ),
     );
-    let type_alias_name = builder.atom(format!("{}RowValues", query.name).as_str());
     let type_alias_decl = builder.declaration_ts_type_alias(
         span,
-        builder.binding_identifier(span, type_alias_name),
+        builder.binding_identifier(span, query.row_values),
         NONE,
         type_alias_body,
         false,
@@ -124,7 +126,7 @@ pub fn row_values_decl<'a>(
         ImportOrExportKind::Value,
         NONE,
     );
-    return Statement::from(export_decl);
+    return export_decl.into();
 }
 
 pub fn row_object<'a>(
@@ -136,40 +138,41 @@ pub fn row_object<'a>(
     let span = Span::dummy(allocator);
     return builder.expression_object(
         span,
-        builder.vec_from_iter(query.columns.iter().enumerate().map(|(index, column)| {
-            return builder.object_property_kind_object_property(
-                span,
-                PropertyKind::Init,
-                builder.property_key_static_identifier(span, column.name.as_str()),
-                builder.expression_ts_as(
-                    span,
-                    Expression::from(builder.member_expression_computed(
+        builder.vec_from_iter(
+            query
+                .query
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    builder.object_property_kind_object_property(
                         span,
-                        builder.expression_identifier(span, "row"),
-                        builder.expression_numeric_literal(
+                        PropertyKind::Init,
+                        builder.property_key_static_identifier(span, column.name.as_str()),
+                        builder.expression_ts_as(
                             span,
-                            index as f64,
-                            Some(builder.atom(&index.to_string())),
-                            NumberBase::Decimal,
+                            builder
+                                .member_expression_computed(
+                                    span,
+                                    builder.expression_identifier(span, "row"),
+                                    builder.expression_numeric_literal(
+                                        span,
+                                        index as f64,
+                                        Some(builder.atom(&index.to_string())),
+                                        NumberBase::Decimal,
+                                    ),
+                                    false,
+                                )
+                                .into(),
+                            driver.column_type(Some(column)),
                         ),
                         false,
-                    )),
-                    driver.column_type(Some(column)),
-                ),
-                false,
-                false,
-                false,
-            );
-        })),
+                        false,
+                        false,
+                    )
+                }),
+        ),
     );
-}
-
-pub fn lowercase_first_letter(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => "".to_string(),
-        Some(first_char) => first_char.to_lowercase().collect::<String>() + chars.as_str(),
-    }
 }
 
 pub fn query_decl<'a>(
@@ -177,8 +180,10 @@ pub fn query_decl<'a>(
     builder: &'a AstBuilder,
     query: &'a Query,
 ) -> Statement<'a> {
-    let text_name = builder.atom(&lowercase_first_letter(&format!("{}Query", query.name)));
-    let sql = format!("\n-- name: {} {}\n{}\n", query.name, query.cmd, query.text);
+    let sql = format!(
+        "\n-- name: {} {}\n{}\n",
+        query.query.name, query.query.cmd, query.query.text
+    );
     let sql_atom = builder.atom(sql.as_str());
 
     let span = Span::dummy(allocator);
@@ -188,7 +193,7 @@ pub fn query_decl<'a>(
         builder.vec1(builder.variable_declarator(
             span,
             VariableDeclarationKind::Const,
-            builder.binding_pattern_binding_identifier(span, text_name),
+            builder.binding_pattern_binding_identifier(span, query.name),
             NONE,
             Some(builder.expression_template_literal(
                 span,
@@ -214,5 +219,21 @@ pub fn query_decl<'a>(
         ImportOrExportKind::Value,
         NONE,
     );
-    return Statement::from(export_decl);
+    return export_decl.into();
+}
+
+pub fn args_from_params<'a>(
+    builder: &'a AstBuilder<'a>,
+    query: &'a Query,
+) -> Vec<'a, Argument<'a>> {
+    return builder.vec_from_iter(
+        query
+            .query
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, _param)| {
+                new_obj_member_expr(builder, "args", query.arg_names[index]).into()
+            }),
+    );
 }
