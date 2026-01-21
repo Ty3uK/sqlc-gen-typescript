@@ -1,80 +1,37 @@
-use oxc_allocator::{Allocator, Dummy};
+use oxc_allocator::Dummy;
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
-        Argument, Atom, BinaryOperator, Expression, FormalParameter, FormalParameterKind,
-        FormalParameters, FunctionType, ImportOrExportKind, NumberBase, Span, Statement, TSType,
-        UnaryOperator, VariableDeclarationKind, WithClause,
+        Atom, BinaryOperator, FormalParameter, FormalParameterKind, FormalParameters, FunctionType,
+        ImportOrExportKind, NumberBase, Span, Statement, TSType, UnaryOperator, WithClause,
     },
 };
 
 use crate::{
-    drivers::Driver, plugin::{Column, Query}, shared::{lowercase_first_letter, row_object}
+    ast_utils::{
+        new_const_decl_statement, new_func_param, new_import_decl, new_method_expr_call,
+        new_obj_member_expr,
+    },
+    drivers::shared::{args_from_params, row_object},
+    drivers::{Driver, Query},
+    plugin::Column,
 };
 
 pub struct BunSqliteDriver<'a> {
-    allocator: &'a Allocator,
     builder: &'a AstBuilder<'a>,
 }
 
 impl<'a> BunSqliteDriver<'a> {
-    pub fn new(allocator: &'a Allocator, builder: &'a AstBuilder) -> Self {
-        Self { allocator, builder }
+    pub fn new(builder: &'a AstBuilder) -> Self {
+        Self { builder }
     }
 
     fn func_params_decl(&self, query: &'a Query) -> FormalParameters<'a> {
-        let span = Span::dummy(self.allocator);
+        let span = Span::dummy(self.builder.allocator);
         let mut params = self.builder.vec_with_capacity::<FormalParameter>(2);
-        params.push(
-            self.builder.formal_parameter(
-                span,
-                self.builder.vec(),
-                self.builder
-                    .binding_pattern_binding_identifier(span, "database"),
-                Some(
-                    self.builder.ts_type_annotation(
-                        span,
-                        self.builder.ts_type_type_reference(
-                            span,
-                            self.builder
-                                .ts_type_name_identifier_reference(span, "Database"),
-                            NONE,
-                        ),
-                    ),
-                ),
-                NONE,
-                false,
-                None,
-                false,
-                false,
-            ),
-        );
-        if query.params.len() > 0 {
-            let args_param_name = self.builder.atom(format!("{}Args", query.name).as_str());
-            params.push(
-                self.builder.formal_parameter(
-                    span,
-                    self.builder.vec(),
-                    self.builder
-                        .binding_pattern_binding_identifier(span, "args"),
-                    Some(
-                        self.builder.ts_type_annotation(
-                            span,
-                            self.builder.ts_type_type_reference(
-                                span,
-                                self.builder
-                                    .ts_type_name_identifier_reference(span, args_param_name),
-                                NONE,
-                            ),
-                        ),
-                    ),
-                    NONE,
-                    false,
-                    None,
-                    false,
-                    false,
-                ),
-            );
+        params.push(new_func_param(self.builder, "database", "Database"));
+        if query.query.params.len() > 0 {
+            params.push(new_func_param(self.builder, "args", query.args));
         }
         return self.builder.formal_parameters(
             span,
@@ -95,7 +52,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                 column_type = self.builder.atom(&t.name);
             }
         }
-        let span = Span::dummy(self.allocator);
+        let span = Span::dummy(self.builder.allocator);
         let mut result_type = self.builder.ts_type_any_keyword(span);
         match column_type.as_str() {
             "int" | "integer" | "tinyint" | "smallint" | "mediumint" | "bigint"
@@ -129,107 +86,59 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
         );
     }
 
-    fn preamble(&self) -> Statement<'a> {
-        let span = Span::dummy(self.allocator);
-        let import_spec = self.builder.import_declaration_specifier_import_specifier(
-            span,
-            self.builder
-                .module_export_name_identifier_name(span, "Database"),
-            self.builder.binding_identifier(span, "Database"),
+    fn preamble(&self, has_execresult: bool) -> Statement<'a> {
+        let span = Span::dummy(self.builder.allocator);
+        let mut import_specs = self.builder.vec1(new_import_decl(
+            self.builder,
+            "Database",
+            "Database",
             ImportOrExportKind::Value,
-        );
+        ));
+        if has_execresult {
+            import_specs.push(new_import_decl(
+                self.builder,
+                "Changes",
+                "Changes",
+                ImportOrExportKind::Type,
+            ));
+        }
         let import_decl = self.builder.module_declaration_import_declaration(
             span,
-            Some(self.builder.vec1(import_spec)),
+            Some(import_specs),
             self.builder.string_literal(span, "bun:sqlite", None),
             None,
             Option::<WithClause>::None,
             ImportOrExportKind::Value,
         );
-        return Statement::from(import_decl);
+        return import_decl.into();
     }
 
     fn exec_decl(&self, query: &'a Query) -> Statement<'a> {
-        let span = Span::dummy(self.allocator);
-        let func_name = self.builder.atom(&lowercase_first_letter(&query.name));
+        let span = Span::dummy(self.builder.allocator);
         let func_body = self.builder.function_body(
             span,
             self.builder.vec(),
             self.builder.vec_from_array([
                 // const stmt = database.prepare(listGroupsQuery);
-                Statement::from(
-                    self.builder.declaration_variable(
-                        span,
-                        VariableDeclarationKind::Const,
-                        self.builder.vec1(
-                            self.builder.variable_declarator(
-                                span,
-                                VariableDeclarationKind::Const,
-                                self.builder
-                                    .binding_pattern_binding_identifier(span, "stmt"),
-                                NONE,
-                                Some(self.builder.expression_call(
-                                    span,
-                                    Expression::from(self.builder.member_expression_static(
-                                        span,
-                                        self.builder.expression_identifier(span, "database"),
-                                        self.builder.identifier_name(span, "prepare"),
-                                        false,
-                                    )),
-                                    NONE,
-                                    self.builder.vec1(Argument::from(
-                                        self.builder.expression_identifier(
-                                            span,
-                                            self.builder.atom(&format!(
-                                                "{}Query",
-                                                lowercase_first_letter(&query.name)
-                                            )),
-                                        ),
-                                    )),
-                                    false,
-                                )),
-                                false,
-                            ),
-                        ),
-                        false,
+                new_const_decl_statement(
+                    self.builder,
+                    "stmt",
+                    new_method_expr_call(
+                        self.builder,
+                        "database",
+                        "prepare",
+                        self.builder
+                            .vec1(self.builder.expression_identifier(span, query.name).into()),
                     ),
                 ),
                 // stmt.run(args.*);
                 self.builder.statement_expression(
                     span,
-                    self.builder.expression_call(
-                        span,
-                        Expression::from(self.builder.member_expression_static(
-                            span,
-                            self.builder.expression_identifier(span, "stmt"),
-                            self.builder.identifier_name(span, "run"),
-                            false,
-                        )),
-                        NONE,
-                        self.builder
-                            .vec_from_iter(query.params.iter().enumerate().map(
-                                |(index, param)| {
-                                    let column_name: Atom;
-                                    if let Some(column) = &param.column {
-                                        column_name = self.builder.atom(column.name.as_str());
-                                    } else {
-                                        column_name =
-                                            self.builder.atom(format!("arg_{index}").as_str());
-                                    }
-                                    return Argument::from(
-                                        self.builder.member_expression_static(
-                                            span,
-                                            self.builder.expression_identifier(span, "args"),
-                                            self.builder.identifier_name(
-                                                span,
-                                                self.builder.atom(&column_name),
-                                            ),
-                                            false,
-                                        ),
-                                    );
-                                },
-                            )),
-                        false,
+                    new_method_expr_call(
+                        self.builder,
+                        "stmt",
+                        "run",
+                        args_from_params(self.builder, query),
                     ),
                 ),
             ]),
@@ -237,7 +146,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
         let func_decl = self.builder.declaration_function(
             span,
             FunctionType::FunctionDeclaration,
-            Some(self.builder.binding_identifier(span, func_name)),
+            Some(self.builder.binding_identifier(span, query.func_name)),
             false,
             false,
             false,
@@ -258,135 +167,61 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             ImportOrExportKind::Value,
             NONE,
         );
-        return Statement::from(export_decl);
+        return export_decl.into();
     }
 
     fn one_decl(&'a self, query: &'a Query) -> Statement<'a> {
-        let span = Span::dummy(self.allocator);
-        let func_name = self.builder.atom(&lowercase_first_letter(&query.name));
-        let func_return_type = Some(self.builder.ts_type_annotation(
-            span,
-            self.builder.ts_type_union_type(
+        let span = Span::dummy(self.builder.allocator);
+        let func_return_type = Some(
+            self.builder.ts_type_annotation(
                 span,
-                self.builder.vec_from_array([
-                    self.builder.ts_type_type_reference(
-                        span,
-                        self.builder.ts_type_name_identifier_reference(
+                self.builder.ts_type_union_type(
+                    span,
+                    self.builder.vec_from_array([
+                        self.builder.ts_type_type_reference(
                             span,
-                            self.builder.atom(&format!("{}Row", query.name)),
+                            self.builder
+                                .ts_type_name_identifier_reference(span, query.row),
+                            NONE,
                         ),
-                        NONE,
-                    ),
-                    self.builder.ts_type_null_keyword(span),
-                ]),
+                        self.builder.ts_type_null_keyword(span),
+                    ]),
+                ),
             ),
-        ));
+        );
         let func_body = self.builder.function_body(
             span,
             self.builder.vec(),
             self.builder.vec_from_array([
                 // const stmt = database.prepare(listGroupsQuery);
-                Statement::from(
-                    self.builder.declaration_variable(
-                        span,
-                        VariableDeclarationKind::Const,
-                        self.builder.vec1(
-                            self.builder.variable_declarator(
-                                span,
-                                VariableDeclarationKind::Const,
-                                self.builder
-                                    .binding_pattern_binding_identifier(span, "stmt"),
-                                NONE,
-                                Some(self.builder.expression_call(
-                                    span,
-                                    Expression::from(self.builder.member_expression_static(
-                                        span,
-                                        self.builder.expression_identifier(span, "database"),
-                                        self.builder.identifier_name(span, "prepare"),
-                                        false,
-                                    )),
-                                    NONE,
-                                    self.builder.vec1(Argument::from(
-                                        self.builder.expression_identifier(
-                                            span,
-                                            self.builder.atom(&format!(
-                                                "{}Query",
-                                                lowercase_first_letter(&query.name)
-                                            )),
-                                        ),
-                                    )),
-                                    false,
-                                )),
-                                false,
-                            ),
-                        ),
-                        false,
+                new_const_decl_statement(
+                    self.builder,
+                    "stmt",
+                    new_method_expr_call(
+                        self.builder,
+                        "database",
+                        "prepare",
+                        self.builder
+                            .vec1(self.builder.expression_identifier(span, query.name).into()),
                     ),
                 ),
                 // const rows = stmt.values(args.*);
-                Statement::from(
-                    self.builder.declaration_variable(
-                        span,
-                        VariableDeclarationKind::Const,
-                        self.builder.vec1(
-                            self.builder.variable_declarator(
-                                span,
-                                VariableDeclarationKind::Const,
-                                self.builder
-                                    .binding_pattern_binding_identifier(span, "rows"),
-                                NONE,
-                                Some(self.builder.expression_call(
-                                    span,
-                                    Expression::from(self.builder.member_expression_static(
-                                        span,
-                                        self.builder.expression_identifier(span, "stmt"),
-                                        self.builder.identifier_name(span, "values"),
-                                        false,
-                                    )),
-                                    NONE,
-                                    self.builder.vec_from_iter(
-                                        query.params.iter().enumerate().map(|(index, param)| {
-                                            let column_name: Atom;
-                                            if let Some(column) = &param.column {
-                                                column_name =
-                                                    self.builder.atom(column.name.as_str());
-                                            } else {
-                                                column_name = self
-                                                    .builder
-                                                    .atom(format!("arg_{index}").as_str());
-                                            }
-                                            return Argument::from(
-                                                self.builder.member_expression_static(
-                                                    span,
-                                                    self.builder
-                                                        .expression_identifier(span, "args"),
-                                                    self.builder.identifier_name(
-                                                        span,
-                                                        self.builder.atom(&column_name),
-                                                    ),
-                                                    false,
-                                                ),
-                                            );
-                                        }),
-                                    ),
-                                    false,
-                                )),
-                                false,
-                            ),
-                        ),
-                        false,
+                new_const_decl_statement(
+                    self.builder,
+                    "rows",
+                    new_method_expr_call(
+                        self.builder,
+                        "stmt",
+                        "values",
+                        args_from_params(self.builder, query),
                     ),
                 ),
+                // if (rows.length !== 1) {}
                 self.builder.statement_if(
                     span,
                     self.builder.expression_binary(
                         span,
-                        Expression::from(self.builder.member_expression_static(
-                            span,
-                            self.builder.expression_identifier(span, "rows"),
-                            self.builder.identifier_name(span, "length"),
-                            false,
-                        )),
+                        new_obj_member_expr(self.builder, "rows", "length"),
                         BinaryOperator::StrictInequality,
                         self.builder.expression_numeric_literal(
                             span,
@@ -404,15 +239,12 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                     ),
                     None,
                 ),
-                Statement::from(self.builder.declaration_variable(
-                    span,
-                    VariableDeclarationKind::Const,
-                    self.builder.vec1(self.builder.variable_declarator(
-                        span,
-                        VariableDeclarationKind::Const,
-                        self.builder.binding_pattern_binding_identifier(span, "row"),
-                        NONE,
-                        Some(Expression::from(self.builder.member_expression_computed(
+                // const row = rows[0];
+                new_const_decl_statement(
+                    self.builder,
+                    "row",
+                    self.builder
+                        .member_expression_computed(
                             span,
                             self.builder.expression_identifier(span, "rows"),
                             self.builder.expression_numeric_literal(
@@ -422,11 +254,10 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                                 NumberBase::Decimal,
                             ),
                             false,
-                        ))),
-                        false,
-                    )),
-                    false,
-                )),
+                        )
+                        .into(),
+                ),
+                // if (!row) {}
                 self.builder.statement_if(
                     span,
                     self.builder.expression_unary(
@@ -445,14 +276,19 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                 ),
                 self.builder.statement_return(
                     span,
-                    Some(row_object(self.allocator, self.builder, self, query)),
+                    Some(row_object(
+                        self.builder.allocator,
+                        self.builder,
+                        self,
+                        query,
+                    )),
                 ),
             ]),
         );
         let func_decl = self.builder.declaration_function(
             span,
             FunctionType::FunctionDeclaration,
-            Some(self.builder.binding_identifier(span, func_name)),
+            Some(self.builder.binding_identifier(span, query.func_name)),
             false,
             false,
             false,
@@ -470,26 +306,25 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             ImportOrExportKind::Value,
             NONE,
         );
-        return Statement::from(export_decl);
+        return export_decl.into();
     }
 
     fn many_decl(&'a self, query: &'a Query) -> Statement<'a> {
-        let span = Span::dummy(self.allocator);
-        let func_name = self.builder.atom(&lowercase_first_letter(&query.name));
-        let func_return_type = Some(self.builder.ts_type_annotation(
-            span,
-            self.builder.ts_type_array_type(
+        let span = Span::dummy(self.builder.allocator);
+        let func_return_type = Some(
+            self.builder.ts_type_annotation(
                 span,
-                self.builder.ts_type_type_reference(
+                self.builder.ts_type_array_type(
                     span,
-                    self.builder.ts_type_name_identifier_reference(
+                    self.builder.ts_type_type_reference(
                         span,
-                        self.builder.atom(&format!("{}Row", query.name)),
+                        self.builder
+                            .ts_type_name_identifier_reference(span, query.row),
+                        NONE,
                     ),
-                    NONE,
                 ),
             ),
-        ));
+        );
         let arrow_func_body = self.builder.function_body(
             span,
             self.builder.vec(),
@@ -497,7 +332,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                 span,
                 self.builder.expression_parenthesized(
                     span,
-                    row_object(self.allocator, self.builder, self, query),
+                    row_object(self.builder.allocator, self.builder, self, query),
                 ),
             )),
         );
@@ -530,87 +365,31 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             self.builder.vec(),
             self.builder.vec_from_array([
                 // const stmt = database.prepare(listGroupsQuery);
-                Statement::from(
-                    self.builder.declaration_variable(
-                        span,
-                        VariableDeclarationKind::Const,
-                        self.builder.vec1(
-                            self.builder.variable_declarator(
-                                span,
-                                VariableDeclarationKind::Const,
-                                self.builder
-                                    .binding_pattern_binding_identifier(span, "stmt"),
-                                NONE,
-                                Some(self.builder.expression_call(
-                                    span,
-                                    Expression::from(self.builder.member_expression_static(
-                                        span,
-                                        self.builder.expression_identifier(span, "database"),
-                                        self.builder.identifier_name(span, "prepare"),
-                                        false,
-                                    )),
-                                    NONE,
-                                    self.builder.vec1(Argument::from(
-                                        self.builder.expression_identifier(
-                                            span,
-                                            self.builder.atom(&format!(
-                                                "{}Query",
-                                                lowercase_first_letter(&query.name)
-                                            )),
-                                        ),
-                                    )),
-                                    false,
-                                )),
-                                false,
-                            ),
-                        ),
-                        false,
+                new_const_decl_statement(
+                    self.builder,
+                    "stmt",
+                    new_method_expr_call(
+                        self.builder,
+                        "database",
+                        "prepare",
+                        self.builder
+                            .vec1(self.builder.expression_identifier(span, query.name).into()),
                     ),
                 ),
                 // const rows = stmt.values();
-                Statement::from(
-                    self.builder.declaration_variable(
-                        span,
-                        VariableDeclarationKind::Const,
-                        self.builder.vec1(
-                            self.builder.variable_declarator(
-                                span,
-                                VariableDeclarationKind::Const,
-                                self.builder
-                                    .binding_pattern_binding_identifier(span, "rows"),
-                                NONE,
-                                Some(self.builder.expression_call(
-                                    span,
-                                    Expression::from(self.builder.member_expression_static(
-                                        span,
-                                        self.builder.expression_identifier(span, "stmt"),
-                                        self.builder.identifier_name(span, "values"),
-                                        false,
-                                    )),
-                                    NONE,
-                                    self.builder.vec(),
-                                    false,
-                                )),
-                                false,
-                            ),
-                        ),
-                        false,
-                    ),
+                new_const_decl_statement(
+                    self.builder,
+                    "rows",
+                    new_method_expr_call(self.builder, "stmt", "values", self.builder.vec()),
                 ),
                 // return rows.map(row => ({ ... });
                 self.builder.statement_return(
                     span,
-                    Some(self.builder.expression_call(
-                        span,
-                        Expression::from(self.builder.member_expression_static(
-                            span,
-                            self.builder.expression_identifier(span, "rows"),
-                            self.builder.identifier_name(span, "map"),
-                            false,
-                        )),
-                        NONE,
-                        self.builder.vec1(Argument::from(arrow_func_expr)),
-                        false,
+                    Some(new_method_expr_call(
+                        self.builder,
+                        "rows",
+                        "map",
+                        self.builder.vec1(arrow_func_expr.into()),
                     )),
                 ),
             ]),
@@ -618,7 +397,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
         let func_decl = self.builder.declaration_function(
             span,
             FunctionType::FunctionDeclaration,
-            Some(self.builder.binding_identifier(span, func_name)),
+            Some(self.builder.binding_identifier(span, query.func_name)),
             false,
             false,
             false,
@@ -636,6 +415,70 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             ImportOrExportKind::Value,
             NONE,
         );
-        return Statement::from(export_decl);
+        return export_decl.into();
+    }
+
+    fn execresult_decl(&self, query: &'a Query) -> Statement<'a> {
+        let span = Span::dummy(self.builder.allocator);
+        let func_body = self.builder.function_body(
+            span,
+            self.builder.vec(),
+            self.builder.vec_from_array([
+                // const stmt = database.prepare(listGroupsQuery);
+                new_const_decl_statement(
+                    self.builder,
+                    "stmt",
+                    new_method_expr_call(
+                        self.builder,
+                        "database",
+                        "prepare",
+                        self.builder
+                            .vec1(self.builder.expression_identifier(span, query.name).into()),
+                    ),
+                ),
+                // return stmt.run(args.*);
+                self.builder.statement_return(
+                    span,
+                    Some(new_method_expr_call(
+                        self.builder,
+                        "stmt",
+                        "run",
+                        args_from_params(self.builder, query),
+                    )),
+                ),
+            ]),
+        );
+        let func_decl = self.builder.declaration_function(
+            span,
+            FunctionType::FunctionDeclaration,
+            Some(self.builder.binding_identifier(span, query.func_name)),
+            false,
+            false,
+            false,
+            NONE,
+            NONE,
+            self.func_params_decl(query),
+            Some(
+                self.builder.ts_type_annotation(
+                    span,
+                    self.builder.ts_type_type_reference(
+                        span,
+                        self.builder
+                            .ts_type_name_identifier_reference(span, "Changes"),
+                        NONE,
+                    ),
+                ),
+            ),
+            Some(func_body),
+        );
+        let export_decl = self.builder.module_declaration_export_named_declaration(
+            span,
+            Some(func_decl),
+            self.builder.vec(),
+            None,
+            ImportOrExportKind::Value,
+            NONE,
+        );
+        return export_decl.into();
     }
 }
