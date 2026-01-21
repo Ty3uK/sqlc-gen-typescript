@@ -1,5 +1,10 @@
+## What's Changed in 0.2.0
+* feat: `:execresult` handler and major refactoring by @Ty3uK in [#1](https://github.com/Ty3uK/sqlc-gen-typescript/pull/1)
+
+**Full Changelog**: https://github.com/Ty3uK/sqlc-gen-typescript/compare/v0.1.0...v0.2.0
+
 ## What's Changed in 0.1.0
-* chore: add CHANGELOG
+* chore: add CHANGELOG by @Ty3uK
 * fix: links in README by @Ty3uK
 * feat: initial release with `bun:sqlite` support by @Ty3uK
 
