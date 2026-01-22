@@ -380,7 +380,12 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                 new_const_decl_statement(
                     self.builder,
                     "rows",
-                    new_method_expr_call(self.builder, "stmt", "values", self.builder.vec()),
+                    new_method_expr_call(
+                        self.builder,
+                        "stmt",
+                        "values",
+                        args_from_params(self.builder, query),
+                    ),
                 ),
                 // return rows.map(row => ({ ... });
                 self.builder.statement_return(
