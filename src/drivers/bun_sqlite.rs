@@ -2,7 +2,7 @@ use oxc_allocator::Dummy;
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
-        Atom, BinaryOperator, FormalParameter, FormalParameterKind, FormalParameters, FunctionType,
+        BinaryOperator, FormalParameter, FormalParameterKind, FormalParameters, FunctionType,
         ImportOrExportKind, NumberBase, Span, Statement, TSType, UnaryOperator, WithClause,
     },
 };
@@ -12,8 +12,10 @@ use crate::{
         new_const_decl_statement, new_func_param, new_import_decl, new_method_expr_call,
         new_obj_member_expr,
     },
-    drivers::shared::{args_from_params, row_object},
-    drivers::{Driver, Query},
+    drivers::{
+        Driver, Query,
+        shared::{args_from_params, row_object},
+    },
     plugin::Column,
 };
 
@@ -40,21 +42,107 @@ impl<'a> BunSqliteDriver<'a> {
             NONE,
         );
     }
+
+    fn query_decl(&self, query: &'a Query) -> Statement<'a> {
+        let span = Span::dummy(self.builder.allocator);
+        // const query = {queryName}Query;
+        let mut expr = self.builder.expression_identifier(span, query.name);
+        let columns = query
+            .query
+            .params
+            .iter()
+            .filter_map(|param| param.column.as_ref().filter(|column| column.is_sqlc_slice));
+        for column in columns {
+            let source = format!("/*SLICE:{}*/?", column.name);
+            // () => "?"
+            let arrow_fn_expr = self.builder.expression_arrow_function(
+                span,
+                true,
+                false,
+                NONE,
+                self.builder.formal_parameters(
+                    span,
+                    FormalParameterKind::ArrowFormalParameters,
+                    self.builder.vec(),
+                    NONE,
+                ),
+                NONE,
+                self.builder.function_body(
+                    span,
+                    self.builder.vec(),
+                    self.builder.vec1(self.builder.statement_expression(
+                        span,
+                        self.builder.expression_string_literal(span, "?", None),
+                    )),
+                ),
+            );
+            // args.{argName}
+            let args_field_expr = new_obj_member_expr(
+                self.builder,
+                self.builder.expression_identifier(span, "args"),
+                column.name.as_str(),
+            );
+            // args.{argName}.map(() => "?").join(", ")
+            let args_map_expr = self.builder.expression_call(
+                span,
+                // args.{argName}.map(() => "?")
+                new_obj_member_expr(
+                    self.builder,
+                    self.builder.expression_call(
+                        span,
+                        new_obj_member_expr(self.builder, args_field_expr, "map"),
+                        NONE,
+                        self.builder.vec1(arrow_fn_expr.into()),
+                        false,
+                    ),
+                    "join",
+                ),
+                NONE,
+                self.builder.vec1(
+                    self.builder
+                        .expression_string_literal(span, ", ", None)
+                        .into(),
+                ),
+                false,
+            );
+            // query = {queryName}Query.replace(...)
+            expr = self.builder.expression_call(
+                span,
+                self.builder
+                    .member_expression_static(
+                        span,
+                        expr,
+                        self.builder.identifier_name(span, "replace"),
+                        false,
+                    )
+                    .into(),
+                NONE,
+                self.builder.vec_from_array([
+                    self.builder
+                        .expression_string_literal(span, self.builder.atom(source.as_str()), None)
+                        .into(),
+                    args_map_expr.into(),
+                ]),
+                false,
+            );
+        }
+        return new_const_decl_statement(self.builder, "query", expr);
+    }
 }
 
 impl<'a> Driver<'a> for BunSqliteDriver<'a> {
     fn column_type(&self, column: Option<&'a Column>) -> TSType<'a> {
-        let mut not_null = false;
-        let mut column_type = Atom::empty();
-        if let Some(c) = column {
-            not_null = c.not_null;
-            if let Some(t) = &c.r#type {
-                column_type = self.builder.atom(&t.name);
-            }
-        }
         let span = Span::dummy(self.builder.allocator);
+        let column = match column {
+            Some(val) => val,
+            _ => return self.builder.ts_type_any_keyword(span),
+        };
+        let column_type = match &column.r#type {
+            Some(val) => val.name.as_str(),
+            _ => return self.builder.ts_type_any_keyword(span),
+        };
         let mut result_type = self.builder.ts_type_any_keyword(span);
-        match column_type.as_str() {
+        match column_type {
             "int" | "integer" | "tinyint" | "smallint" | "mediumint" | "bigint"
             | "unsignedbigint" | "int2" | "int8" => {
                 result_type = self.builder.ts_type_number_keyword(span)
@@ -75,7 +163,10 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             "bool" | "boolean" => result_type = self.builder.ts_type_boolean_keyword(span),
             _ => {}
         }
-        if not_null {
+        if column.is_sqlc_slice {
+            result_type = self.builder.ts_type_array_type(span, result_type);
+        }
+        if column.not_null {
             return result_type;
         }
 
@@ -119,16 +210,17 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             span,
             self.builder.vec(),
             self.builder.vec_from_array([
+                self.query_decl(query),
                 // const stmt = database.prepare(listGroupsQuery);
                 new_const_decl_statement(
                     self.builder,
                     "stmt",
                     new_method_expr_call(
                         self.builder,
-                        "database",
+                        self.builder.expression_identifier(span, "database"),
                         "prepare",
                         self.builder
-                            .vec1(self.builder.expression_identifier(span, query.name).into()),
+                            .vec1(self.builder.expression_identifier(span, "query").into()),
                     ),
                 ),
                 // stmt.run(args.*);
@@ -136,7 +228,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                     span,
                     new_method_expr_call(
                         self.builder,
-                        "stmt",
+                        self.builder.expression_identifier(span, "stmt"),
                         "run",
                         args_from_params(self.builder, query),
                     ),
@@ -193,16 +285,17 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             span,
             self.builder.vec(),
             self.builder.vec_from_array([
+                self.query_decl(query),
                 // const stmt = database.prepare(listGroupsQuery);
                 new_const_decl_statement(
                     self.builder,
                     "stmt",
                     new_method_expr_call(
                         self.builder,
-                        "database",
+                        self.builder.expression_identifier(span, "database"),
                         "prepare",
                         self.builder
-                            .vec1(self.builder.expression_identifier(span, query.name).into()),
+                            .vec1(self.builder.expression_identifier(span, "query").into()),
                     ),
                 ),
                 // const rows = stmt.values(args.*);
@@ -211,7 +304,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                     "rows",
                     new_method_expr_call(
                         self.builder,
-                        "stmt",
+                        self.builder.expression_identifier(span, "stmt"),
                         "values",
                         args_from_params(self.builder, query),
                     ),
@@ -221,7 +314,11 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                     span,
                     self.builder.expression_binary(
                         span,
-                        new_obj_member_expr(self.builder, "rows", "length"),
+                        new_obj_member_expr(
+                            self.builder,
+                            self.builder.expression_identifier(span, "rows"),
+                            "length",
+                        ),
                         BinaryOperator::StrictInequality,
                         self.builder.expression_numeric_literal(
                             span,
@@ -364,16 +461,17 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             span,
             self.builder.vec(),
             self.builder.vec_from_array([
+                self.query_decl(query),
                 // const stmt = database.prepare(listGroupsQuery);
                 new_const_decl_statement(
                     self.builder,
                     "stmt",
                     new_method_expr_call(
                         self.builder,
-                        "database",
+                        self.builder.expression_identifier(span, "database"),
                         "prepare",
                         self.builder
-                            .vec1(self.builder.expression_identifier(span, query.name).into()),
+                            .vec1(self.builder.expression_identifier(span, "query").into()),
                     ),
                 ),
                 // const rows = stmt.values();
@@ -382,7 +480,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                     "rows",
                     new_method_expr_call(
                         self.builder,
-                        "stmt",
+                        self.builder.expression_identifier(span, "stmt"),
                         "values",
                         args_from_params(self.builder, query),
                     ),
@@ -392,7 +490,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                     span,
                     Some(new_method_expr_call(
                         self.builder,
-                        "rows",
+                        self.builder.expression_identifier(span, "rows"),
                         "map",
                         self.builder.vec1(arrow_func_expr.into()),
                     )),
@@ -429,16 +527,17 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
             span,
             self.builder.vec(),
             self.builder.vec_from_array([
+                self.query_decl(query),
                 // const stmt = database.prepare(listGroupsQuery);
                 new_const_decl_statement(
                     self.builder,
                     "stmt",
                     new_method_expr_call(
                         self.builder,
-                        "database",
+                        self.builder.expression_identifier(span, "database"),
                         "prepare",
                         self.builder
-                            .vec1(self.builder.expression_identifier(span, query.name).into()),
+                            .vec1(self.builder.expression_identifier(span, "query").into()),
                     ),
                 ),
                 // return stmt.run(args.*);
@@ -446,7 +545,7 @@ impl<'a> Driver<'a> for BunSqliteDriver<'a> {
                     span,
                     Some(new_method_expr_call(
                         self.builder,
-                        "stmt",
+                        self.builder.expression_identifier(span, "stmt"),
                         "run",
                         args_from_params(self.builder, query),
                     )),
