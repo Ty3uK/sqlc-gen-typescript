@@ -226,14 +226,18 @@ pub fn args_from_params<'a>(
     builder: &'a AstBuilder<'a>,
     query: &'a Query,
 ) -> Vec<'a, Argument<'a>> {
-    return builder.vec_from_iter(
-        query
-            .query
-            .params
-            .iter()
-            .enumerate()
-            .map(|(index, _param)| {
-                new_obj_member_expr(builder, "args", query.arg_names[index]).into()
-            }),
-    );
+    return builder.vec_from_iter(query.query.params.iter().enumerate().map(|(index, param)| {
+        let span = Span::dummy(builder.allocator);
+        let expr = new_obj_member_expr(
+            builder,
+            builder.expression_identifier(span, "args"),
+            query.arg_names[index],
+        );
+        if let Some(column) = param.column.as_ref() {
+            if column.is_sqlc_slice {
+                return builder.argument_spread_element(span, expr);
+            }
+        }
+        return expr.into();
+    }));
 }

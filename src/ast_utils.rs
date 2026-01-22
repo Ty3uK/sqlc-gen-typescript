@@ -50,23 +50,18 @@ pub fn new_import_decl<'a>(
 
 pub fn new_obj_member_expr<'a>(
     builder: &'a AstBuilder<'a>,
-    object: &'a str,
+    object: Expression<'a>,
     member: &'a str,
 ) -> Expression<'a> {
     let span = Span::dummy(builder.allocator);
     return builder
-        .member_expression_static(
-            span,
-            builder.expression_identifier(span, object),
-            builder.identifier_name(span, member),
-            false,
-        )
+        .member_expression_static(span, object, builder.identifier_name(span, member), false)
         .into();
 }
 
 pub fn new_method_expr_call<'a>(
     builder: &'a AstBuilder<'a>,
-    object: &'a str,
+    object: Expression<'a>,
     method: &'a str,
     args: Vec<'a, Argument>,
 ) -> Expression<'a> {
