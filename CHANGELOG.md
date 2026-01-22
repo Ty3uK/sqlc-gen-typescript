@@ -1,4 +1,10 @@
+## What's Changed in 0.2.1
+* fix: passing args to `:many` by @Ty3uK in [#2](https://github.com/Ty3uK/sqlc-gen-typescript/pull/2)
+
+**Full Changelog**: https://github.com/Ty3uK/sqlc-gen-typescript/compare/v0.2.0...v0.2.1
+
 ## What's Changed in 0.2.0
+* chore: update CHANGELOG by @Ty3uK
 * feat: `:execresult` handler and major refactoring by @Ty3uK in [#1](https://github.com/Ty3uK/sqlc-gen-typescript/pull/1)
 
 **Full Changelog**: https://github.com/Ty3uK/sqlc-gen-typescript/compare/v0.1.0...v0.2.0
